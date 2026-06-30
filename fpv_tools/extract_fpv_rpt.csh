@@ -1,23 +1,6 @@
 #!/bin/csh -f
 # =============================================================================
 # extract_fpv_rpt.csh
-# -----------------------------------------------------------------------------
-# Reads Jasper FPV log files, extracts the SUMMARY block, and writes one
-# structured .rpt file per FPV module per customer.
-#
-# Log path pattern:
-#   <BASE_DIR>/fuse_<CUSTOMER>/jasper/fuse_fpv_<MODULE>_out/jg_fpv/log/fuse.fpv.log
-#
-# - CUSTOMER : parsed from directory name  fuse_<CUSTOMER>  (fuse_*_visa skipped)
-# - MODULE   : parsed from directory name  fuse_fpv_<MODULE>_out
-#
-# Log file search order: fuse.fpv.log > *.log > *.rpt
-#
-# Output .rpt files are written to:
-#   <RPT_DIR>/<MODULE>/<CUSTOMER>.rpt
-#
-# Usage:
-#   csh extract_fpv_rpt.csh [base_output_dir] [rpt_out_dir]
 # =============================================================================
 
 # ---------------------------------------------------------------------------
@@ -54,9 +37,6 @@ echo ""
 # ---------------------------------------------------------------------------
 if ( ! -d "$BASE_DIR" ) then
     echo "ERROR: Base directory not found: $BASE_DIR"
-    echo ""
-    echo "  Please pass the correct path explicitly:"
-    echo "  csh extract_fpv_rpt.csh <base_output_dir> [rpt_out_dir]"
     exit 1
 endif
 
@@ -73,26 +53,26 @@ if ( ! -d "$RPT_DIR" ) then
 endif
 
 # ---------------------------------------------------------------------------
-# Write the awk parser to a temp file to avoid CSH single-quote conflicts
+# Write awk parser to temp file
 #
-# Actual log SUMMARY block format (Jasper FPV fuse.fpv.log):
+# Actual structure (verified with cat -A):
+#   ==============================================================$   <- fence line 3149
+#   SUMMARY$                                                          <- line 3150
+#   ==============================================================$   <- fence line 3151 -> START data
+#            Properties Considered              : 388$
+#                  assertions                   : 121$
+#                  - proven                    : 121 (100%)$
+#                  - cex                       : 0 (0%)$
+#                 covers                       : 267$
+#                  - unreachable               : 196 (73.4082%)$
+#                  - covered                   : 71 (26.5918%)$
+#   INFO (IPF177): ...                                                <- first non-data line -> STOP
 #
-#   ==============================================================   <- fence (line N)
-#   SUMMARY                                                          <- keyword (line N+1)
-#   ==============================================================   <- fence (line N+2) -> START parsing
-#            Properties Considered              : 388
-#                  assertions                   : 121
-#                   - proven                    : 121 (100%)
-#                   - cex                       : 0 (0%)
-#                  covers                       : 267
-#                   - covered                   : 71 (26.59%)
-#                   - unreachable               : 196 (73.41%)
-#   ==============================================================   <- fence -> STOP
-#
-# Strategy: track the line number of "SUMMARY" keyword.
-# Once found, the very next ==== fence line starts data collection,
-# and the fence after that stops it.
-# This avoids any state-machine ordering issues.
+# The block has NO closing fence -- it ends when a non-indented INFO line appears.
+# Strategy: record line number of SUMMARY keyword.
+#           The fence at SUMMARY+1 starts collection.
+#           Collection stops when a line does NOT start with whitespace
+#           (i.e. the INFO lines after the data block).
 # ---------------------------------------------------------------------------
 set AWK_SCRIPT = "/tmp/fpv_parse_$$.awk"
 
@@ -100,7 +80,6 @@ cat > "$AWK_SCRIPT" << 'AWKEOF'
 BEGIN {
     summary_line   = 0
     collecting     = 0
-    done           = 0
     props_total    = 0
     assert_total   = 0
     assert_proven  = 0
@@ -110,73 +89,68 @@ BEGIN {
     covers_unreach = 0
 }
 
-# Already done - skip everything
-done == 1 { next }
-
-# Track line number of bare SUMMARY keyword
-/^SUMMARY$/ {
+# Record line number when we see bare "SUMMARY"
+$0 == "SUMMARY" {
     summary_line = NR
     next
 }
 
-# ==== fence lines
-/^=+$/ {
-    if ( summary_line > 0 && collecting == 0 && NR == summary_line + 1 ) {
-        # This is the fence immediately after SUMMARY - start collecting
-        collecting = 1
-        next
-    }
-    if ( collecting == 1 ) {
-        # This is the closing fence - stop
-        done = 1
-        next
-    }
+# The fence line immediately after SUMMARY starts collection
+index($0, "===") == 1 && NR == summary_line + 1 {
+    collecting = 1
     next
 }
 
-# Parse data lines while collecting
+# While collecting: stop if line does not start with whitespace
+# (the data lines all start with spaces; INFO lines start with "I")
+collecting == 1 && $0 !~ /^[ \t]/ {
+    collecting = 0
+    next
+}
+
+# Parse data lines
 collecting == 1 {
     # Properties Considered : 388
-    if ( $0 ~ /Properties Considered/ ) {
-        n = split($0, a, ":")
-        match(a[n], /[0-9]+/)
-        props_total = substr(a[n], RSTART, RLENGTH) + 0
+    if ( index($0, "Properties Considered") > 0 ) {
+        split($0, a, ":")
+        match(a[length(a)], /[0-9]+/)
+        props_total = substr(a[length(a)], RSTART, RLENGTH) + 0
     }
-    # assertions : 121
-    if ( $0 ~ /assertions/ && $0 !~ /^[[:space:]]*-/ ) {
-        n = split($0, a, ":")
-        match(a[n], /[0-9]+/)
-        assert_total = substr(a[n], RSTART, RLENGTH) + 0
+    # assertions : 121  (not a sub-item)
+    if ( index($0, "assertions") > 0 && index($0, "-") == 0 ) {
+        split($0, a, ":")
+        match(a[length(a)], /[0-9]+/)
+        assert_total = substr(a[length(a)], RSTART, RLENGTH) + 0
     }
-    # - proven : 121 (100%)
-    if ( $0 ~ /- proven/ && $0 !~ /bounded/ && $0 !~ /marked/ ) {
-        n = split($0, a, ":")
-        match(a[n], /[0-9]+/)
-        assert_proven = substr(a[n], RSTART, RLENGTH) + 0
+    # - proven : 121  (not bounded, not marked)
+    if ( index($0, "- proven") > 0 && index($0, "bounded") == 0 && index($0, "marked") == 0 ) {
+        split($0, a, ":")
+        match(a[length(a)], /[0-9]+/)
+        assert_proven = substr(a[length(a)], RSTART, RLENGTH) + 0
     }
-    # - cex : 0 (0%)
-    if ( $0 ~ /- cex/ && $0 !~ /ar_cex/ ) {
-        n = split($0, a, ":")
-        match(a[n], /[0-9]+/)
-        assert_cex = substr(a[n], RSTART, RLENGTH) + 0
+    # - cex : 0  (not ar_cex)
+    if ( index($0, "- cex") > 0 && index($0, "ar_cex") == 0 ) {
+        split($0, a, ":")
+        match(a[length(a)], /[0-9]+/)
+        assert_cex = substr(a[length(a)], RSTART, RLENGTH) + 0
     }
-    # covers : 267
-    if ( $0 ~ /covers/ && $0 !~ /^[[:space:]]*-/ ) {
-        n = split($0, a, ":")
-        match(a[n], /[0-9]+/)
-        covers_total = substr(a[n], RSTART, RLENGTH) + 0
+    # covers : 267  (not a sub-item)
+    if ( index($0, "covers") > 0 && index($0, "-") == 0 ) {
+        split($0, a, ":")
+        match(a[length(a)], /[0-9]+/)
+        covers_total = substr(a[length(a)], RSTART, RLENGTH) + 0
     }
-    # - covered : 71 (26.59%)
-    if ( $0 ~ /- covered/ && $0 !~ /ar_covered/ && $0 !~ /bounded/ ) {
-        n = split($0, a, ":")
-        match(a[n], /[0-9]+/)
-        covers_covered = substr(a[n], RSTART, RLENGTH) + 0
+    # - covered : 71  (not ar_covered, not bounded)
+    if ( index($0, "- covered") > 0 && index($0, "ar_covered") == 0 && index($0, "bounded") == 0 ) {
+        split($0, a, ":")
+        match(a[length(a)], /[0-9]+/)
+        covers_covered = substr(a[length(a)], RSTART, RLENGTH) + 0
     }
-    # - unreachable : 196 (73.41%)
-    if ( $0 ~ /- unreachable/ && $0 !~ /bounded/ ) {
-        n = split($0, a, ":")
-        match(a[n], /[0-9]+/)
-        covers_unreach = substr(a[n], RSTART, RLENGTH) + 0
+    # - unreachable : 196  (not bounded)
+    if ( index($0, "- unreachable") > 0 && index($0, "bounded") == 0 ) {
+        split($0, a, ":")
+        match(a[length(a)], /[0-9]+/)
+        covers_unreach = substr(a[length(a)], RSTART, RLENGTH) + 0
     }
 }
 
@@ -231,7 +205,6 @@ end
 
 if ( $#CUST_DIRS == 0 ) then
     echo "ERROR: No valid customer directories (fuse_*, excluding fuse_*_visa) found under $BASE_DIR"
-    echo "  Contents of $BASE_DIR :"
     ls "$BASE_DIR"
     rm -f "$AWK_SCRIPT"
     exit 1
