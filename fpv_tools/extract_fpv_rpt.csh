@@ -74,6 +74,24 @@ endif
 
 # ---------------------------------------------------------------------------
 # Write the awk parser to a temp file to avoid CSH single-quote conflicts
+#
+# Log SUMMARY block format (Jasper FPV):
+#   SUMMARY
+#   ==============================================================
+#            Properties Considered              : 388
+#                  assertions                   : 121
+#                   - proven                    : 121 (100%)
+#                   - cex                       : 0 (0%)
+#                  covers                       : 267
+#                   - covered                   : 71 (26.59%)
+#                   - unreachable               : 196 (73.41%)
+#   ==============================================================
+#
+# State machine:
+#   0 = before SUMMARY
+#   1 = saw "SUMMARY", waiting for opening ====
+#   2 = inside summary block, parsing fields
+#   3 = done (saw closing ====), stop parsing
 # ---------------------------------------------------------------------------
 set AWK_SCRIPT = "/tmp/fpv_parse_$$.awk"
 
@@ -89,37 +107,49 @@ BEGIN {
     covers_unreach = 0
 }
 
-# State machine: SUMMARY keyword then ==== fence activates parsing
-/SUMMARY/ {
+# Only match bare "SUMMARY" line (not "ProofMaster Summary" etc.)
+/^[[:space:]]*SUMMARY[[:space:]]*$/ {
     if ( in_summary == 0 ) { in_summary = 1 }
     next
 }
+
 /^={10,}/ {
-    if ( in_summary == 1 ) { in_summary = 2 }
+    if ( in_summary == 1 ) { in_summary = 2; next }  # opening fence
+    if ( in_summary == 2 ) { in_summary = 3; next }  # closing fence — stop
     next
 }
 
+# Skip lines once summary block is closed
+in_summary == 3 { next }
+
 in_summary == 2 {
+    # Strip trailing percentage annotation e.g. ": 121 (100%)" -> use first number after ":"
     if ( $0 ~ /Properties Considered/ ) {
-        match($0, /[0-9]+/); props_total = substr($0, RSTART, RLENGTH) + 0
+        split($0, a, ":"); match(a[2], /[0-9]+/); props_total = substr(a[2], RSTART, RLENGTH) + 0
     }
-    if ( $0 ~ /^ *assertions *:/ ) {
-        match($0, /[0-9]+/); assert_total = substr($0, RSTART, RLENGTH) + 0
+    # assertions total (line with "assertions" but NOT a sub-item starting with "-")
+    if ( $0 ~ /assertions/ && $0 !~ /^[[:space:]]*-/ ) {
+        split($0, a, ":"); match(a[2], /[0-9]+/); assert_total = substr(a[2], RSTART, RLENGTH) + 0
     }
-    if ( $0 ~ /- proven *:/ && $0 !~ /bounded/ && $0 !~ /marked/ ) {
-        match($0, /[0-9]+/); assert_proven = substr($0, RSTART, RLENGTH) + 0
+    # proven (sub-item, not bounded_proven, not marked_proven)
+    if ( $0 ~ /- proven/ && $0 !~ /bounded/ && $0 !~ /marked/ ) {
+        split($0, a, ":"); match(a[2], /[0-9]+/); assert_proven = substr(a[2], RSTART, RLENGTH) + 0
     }
-    if ( $0 ~ /- cex *:/ && $0 !~ /ar_cex/ ) {
-        match($0, /[0-9]+/); assert_cex = substr($0, RSTART, RLENGTH) + 0
+    # cex (not ar_cex)
+    if ( $0 ~ /- cex/ && $0 !~ /ar_cex/ ) {
+        split($0, a, ":"); match(a[2], /[0-9]+/); assert_cex = substr(a[2], RSTART, RLENGTH) + 0
     }
-    if ( $0 ~ /^ *covers *:/ ) {
-        match($0, /[0-9]+/); covers_total = substr($0, RSTART, RLENGTH) + 0
+    # covers total (line with "covers" but NOT a sub-item)
+    if ( $0 ~ /covers/ && $0 !~ /^[[:space:]]*-/ ) {
+        split($0, a, ":"); match(a[2], /[0-9]+/); covers_total = substr(a[2], RSTART, RLENGTH) + 0
     }
-    if ( $0 ~ /- covered *:/ && $0 !~ /ar_covered/ && $0 !~ /bounded/ ) {
-        match($0, /[0-9]+/); covers_covered = substr($0, RSTART, RLENGTH) + 0
+    # covered (not ar_covered, not bounded)
+    if ( $0 ~ /- covered/ && $0 !~ /ar_covered/ && $0 !~ /bounded/ ) {
+        split($0, a, ":"); match(a[2], /[0-9]+/); covers_covered = substr(a[2], RSTART, RLENGTH) + 0
     }
-    if ( $0 ~ /- unreachable *:/ && $0 !~ /bounded/ ) {
-        match($0, /[0-9]+/); covers_unreach = substr($0, RSTART, RLENGTH) + 0
+    # unreachable (not bounded)
+    if ( $0 ~ /- unreachable/ && $0 !~ /bounded/ ) {
+        split($0, a, ":"); match(a[2], /[0-9]+/); covers_unreach = substr(a[2], RSTART, RLENGTH) + 0
     }
 }
 
