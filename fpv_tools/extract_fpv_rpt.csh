@@ -21,12 +21,10 @@
 # =============================================================================
 
 # ---------------------------------------------------------------------------
-# Fixed project NFS path — update here if project root changes
+# Fixed NFS paths — update here if project paths change
 # ---------------------------------------------------------------------------
 set DEFAULT_BASE_DIR = "/nfs/site/disks/zsc11_fuse_00003/ip-fuse-gen4p1-cth-uvm-FPV-cron/ip-fuse-gen4p1-cth/output"
-
-set SCRIPT_DIR = `dirname $0`
-set SCRIPT_DIR = `cd "$SCRIPT_DIR" && pwd`
+set DEFAULT_RPT_DIR  = "/nfs/site/disks/zsc11_fuse_00003/ip-fuse-gen4p1-cth-uvm-FPV-cron/scripts/fpv_rpt"
 
 # ---------------------------------------------------------------------------
 # Argument handling
@@ -40,7 +38,7 @@ endif
 if ( $#argv >= 2 ) then
     set RPT_DIR = $argv[2]
 else
-    set RPT_DIR = "${SCRIPT_DIR}/fpv_rpt"
+    set RPT_DIR = "$DEFAULT_RPT_DIR"
 endif
 
 echo "=============================================================="
@@ -248,7 +246,6 @@ foreach CUST_FULL ( $CUST_DIRS )
 
         set OUT_RPT = "${RPT_DIR}/${MOD_NAME}/${CUST_NAME}.rpt"
 
-        # Run awk parser (no inline single quotes — uses temp script file)
         awk -v cust="$CUST_NAME" \
             -v module="$MOD_NAME" \
             -v logfile="$LOG_FILE" \
@@ -266,7 +263,6 @@ foreach CUST_FULL ( $CUST_DIRS )
     end  # foreach MOD_FULL
 end  # foreach CUST_FULL
 
-# Clean up temp awk script
 rm -f "$AWK_SCRIPT"
 
 echo ""
