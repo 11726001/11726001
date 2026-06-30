@@ -8,7 +8,7 @@
 # Log path pattern:
 #   <BASE_DIR>/fuse_<CUSTOMER>/jasper/fuse_fpv_<MODULE>_out/jg_fpv/log/*.{rpt,log}
 #
-# - CUSTOMER : parsed from directory name  fuse_<CUSTOMER>
+# - CUSTOMER : parsed from directory name  fuse_<CUSTOMER>  (fuse_*_visa skipped)
 # - MODULE   : parsed from directory name  fuse_fpv_<MODULE>_out
 #
 # Output .rpt files are written to:
@@ -67,12 +67,29 @@ if ( ! -d "$BASE_DIR" ) then
 endif
 
 # ---------------------------------------------------------------------------
-# Auto-discover customer directories (fuse_*) under BASE_DIR
+# Discover customer directories using glob (fuse_* under BASE_DIR)
+# Skips fuse_*_visa directories
 # ---------------------------------------------------------------------------
-set CUST_DIRS = ( `find "$BASE_DIR" -maxdepth 1 -type d -name "fuse_*" 2>/dev/null | sort` )
+set ALL_DIRS  = ( ${BASE_DIR}/fuse_* )
+set CUST_DIRS = ()
+
+foreach D ( $ALL_DIRS )
+    if ( ! -d "$D" ) continue
+
+    # Skip visa directories: fuse_*_visa
+    set DNAME = `basename "$D"`
+    if ( "$DNAME" =~ *_visa ) then
+        echo "  [SKIP] $DNAME -- visa directory, skipping"
+        continue
+    endif
+
+    set CUST_DIRS = ( $CUST_DIRS $D )
+end
 
 if ( $#CUST_DIRS == 0 ) then
-    echo "ERROR: No customer directories (fuse_*) found under $BASE_DIR"
+    echo "ERROR: No valid customer directories (fuse_*, excluding fuse_*_visa) found under $BASE_DIR"
+    echo "  Contents of $BASE_DIR :"
+    ls "$BASE_DIR"
     exit 1
 endif
 
@@ -90,7 +107,9 @@ set total_missing   = 0
 
 foreach CUST_FULL ( $CUST_DIRS )
 
-    # Parse customer name: strip path and leading fuse_
+    if ( ! -d "$CUST_FULL" ) continue
+
+    # Parse customer name: strip path prefix and leading fuse_
     set CUST_DIR  = `basename "$CUST_FULL"`
     set CUST_NAME = `echo "$CUST_DIR" | sed 's/^fuse_//'`
 
@@ -100,15 +119,17 @@ foreach CUST_FULL ( $CUST_DIRS )
         continue
     endif
 
-    # Auto-discover all fuse_fpv_*_out module directories under jasper/
-    set MOD_DIRS = ( `find "$JASPER_DIR" -maxdepth 1 -type d -name "fuse_fpv_*_out" 2>/dev/null | sort` )
+    # Discover all fuse_fpv_*_out module directories under jasper/ using glob
+    set MOD_DIRS = ( ${JASPER_DIR}/fuse_fpv_*_out )
 
-    if ( $#MOD_DIRS == 0 ) then
+    if ( ! -d "$MOD_DIRS[1]" ) then
         echo "  [SKIP] $CUST_NAME -- no fuse_fpv_*_out dirs in $JASPER_DIR"
         continue
     endif
 
     foreach MOD_FULL ( $MOD_DIRS )
+
+        if ( ! -d "$MOD_FULL" ) continue
 
         # Parse module name: strip fuse_fpv_ prefix and _out suffix
         set MOD_DIR  = `basename "$MOD_FULL"`
@@ -122,17 +143,18 @@ foreach CUST_FULL ( $CUST_DIRS )
             continue
         endif
 
-        # Find the first .rpt or .log file
+        # Find first .rpt then .log file using glob
         set LOG_FILE = ""
-        foreach EXT ( rpt log )
-            set CANDIDATE = `ls -1 ${LOG_DIR}/*.${EXT} 2>/dev/null | head -1`
-            if ( "$CANDIDATE" != "" ) then
-                if ( -f "$CANDIDATE" ) then
-                    set LOG_FILE = "$CANDIDATE"
-                    break
-                endif
+
+        set RPT_CANDS = ( ${LOG_DIR}/*.rpt )
+        if ( -f "$RPT_CANDS[1]" ) then
+            set LOG_FILE = "$RPT_CANDS[1]"
+        else
+            set LOG_CANDS = ( ${LOG_DIR}/*.log )
+            if ( -f "$LOG_CANDS[1]" ) then
+                set LOG_FILE = "$LOG_CANDS[1]"
             endif
-        end
+        endif
 
         if ( "$LOG_FILE" == "" ) then
             echo "  [SKIP] $CUST_NAME / $MOD_NAME -- no .rpt or .log in $LOG_DIR"
