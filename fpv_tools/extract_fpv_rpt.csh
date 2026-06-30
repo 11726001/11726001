@@ -61,6 +61,18 @@ if ( ! -d "$BASE_DIR" ) then
 endif
 
 # ---------------------------------------------------------------------------
+# Create RPT root directory early if it does not exist
+# ---------------------------------------------------------------------------
+if ( ! -d "$RPT_DIR" ) then
+    echo "  Creating RPT dir : $RPT_DIR"
+    mkdir -p "$RPT_DIR"
+    if ( $status != 0 ) then
+        echo "ERROR: Failed to create RPT directory: $RPT_DIR"
+        exit 1
+    endif
+endif
+
+# ---------------------------------------------------------------------------
 # Write the awk parser to a temp file to avoid CSH single-quote conflicts
 # ---------------------------------------------------------------------------
 set AWK_SCRIPT = "/tmp/fpv_parse_$$.awk"
@@ -240,8 +252,14 @@ foreach CUST_FULL ( $CUST_DIRS )
         echo "  [EXTRACT] $CUST_NAME / $MOD_NAME"
         echo "            Log : $LOG_FILE"
 
+        # Create per-module subdir under RPT_DIR
         if ( ! -d "${RPT_DIR}/${MOD_NAME}" ) then
             mkdir -p "${RPT_DIR}/${MOD_NAME}"
+            if ( $status != 0 ) then
+                echo "  ERROR: Failed to create ${RPT_DIR}/${MOD_NAME}"
+                @ total_missing++
+                continue
+            endif
         endif
 
         set OUT_RPT = "${RPT_DIR}/${MOD_NAME}/${CUST_NAME}.rpt"
