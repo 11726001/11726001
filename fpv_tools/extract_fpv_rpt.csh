@@ -53,139 +53,97 @@ if ( ! -d "$RPT_DIR" ) then
 endif
 
 # ---------------------------------------------------------------------------
-# Write awk parser to temp file
+# Write awk parser using printf (no heredoc -- CSH heredoc termination is
+# unreliable and causes the rest of the script to be included in the awk file)
 #
-# Actual structure (verified with cat -A):
-#   ==============================================================$   <- fence line 3149
-#   SUMMARY$                                                          <- line 3150
-#   ==============================================================$   <- fence line 3151 -> START data
-#            Properties Considered              : 388$
-#                  assertions                   : 121$
-#                  - proven                    : 121 (100%)$
-#                  - cex                       : 0 (0%)$
-#                 covers                       : 267$
-#                  - unreachable               : 196 (73.4082%)$
-#                  - covered                   : 71 (26.5918%)$
-#   INFO (IPF177): ...                                                <- first non-data line -> STOP
-#
-# The block has NO closing fence -- it ends when a non-indented INFO line appears.
-# Strategy: record line number of SUMMARY keyword.
-#           The fence at SUMMARY+1 starts collection.
-#           Collection stops when a line does NOT start with whitespace
-#           (i.e. the INFO lines after the data block).
+# Verified log structure (cat -A on fuse.fpv.log):
+#   ==============================================================  line N
+#   SUMMARY                                                         line N+1
+#   ==============================================================  line N+2  -> start collecting
+#            Properties Considered              : 388
+#                  assertions                   : 121
+#                   - proven                    : 121 (100%)
+#                   - cex                       : 0 (0%)
+#                  covers                       : 267
+#                   - unreachable               : 196 (73.4082%)
+#                   - covered                   : 71 (26.5918%)
+#   INFO (IPF177): ...                                              <- non-indented -> stop
 # ---------------------------------------------------------------------------
 set AWK_SCRIPT = "/tmp/fpv_parse_$$.awk"
+rm -f "$AWK_SCRIPT"
 
-cat > "$AWK_SCRIPT" << 'AWKEOF'
-BEGIN {
-    summary_line   = 0
-    collecting     = 0
-    props_total    = 0
-    assert_total   = 0
-    assert_proven  = 0
-    assert_cex     = 0
-    covers_total   = 0
-    covers_covered = 0
-    covers_unreach = 0
-}
-
-# Record line number when we see bare "SUMMARY"
-$0 == "SUMMARY" {
-    summary_line = NR
-    next
-}
-
-# The fence line immediately after SUMMARY starts collection
-index($0, "===") == 1 && NR == summary_line + 1 {
-    collecting = 1
-    next
-}
-
-# While collecting: stop if line does not start with whitespace
-# (the data lines all start with spaces; INFO lines start with "I")
-collecting == 1 && $0 !~ /^[ \t]/ {
-    collecting = 0
-    next
-}
-
-# Parse data lines
-collecting == 1 {
-    # Properties Considered : 388
-    if ( index($0, "Properties Considered") > 0 ) {
-        split($0, a, ":")
-        match(a[length(a)], /[0-9]+/)
-        props_total = substr(a[length(a)], RSTART, RLENGTH) + 0
-    }
-    # assertions : 121  (not a sub-item)
-    if ( index($0, "assertions") > 0 && index($0, "-") == 0 ) {
-        split($0, a, ":")
-        match(a[length(a)], /[0-9]+/)
-        assert_total = substr(a[length(a)], RSTART, RLENGTH) + 0
-    }
-    # - proven : 121  (not bounded, not marked)
-    if ( index($0, "- proven") > 0 && index($0, "bounded") == 0 && index($0, "marked") == 0 ) {
-        split($0, a, ":")
-        match(a[length(a)], /[0-9]+/)
-        assert_proven = substr(a[length(a)], RSTART, RLENGTH) + 0
-    }
-    # - cex : 0  (not ar_cex)
-    if ( index($0, "- cex") > 0 && index($0, "ar_cex") == 0 ) {
-        split($0, a, ":")
-        match(a[length(a)], /[0-9]+/)
-        assert_cex = substr(a[length(a)], RSTART, RLENGTH) + 0
-    }
-    # covers : 267  (not a sub-item)
-    if ( index($0, "covers") > 0 && index($0, "-") == 0 ) {
-        split($0, a, ":")
-        match(a[length(a)], /[0-9]+/)
-        covers_total = substr(a[length(a)], RSTART, RLENGTH) + 0
-    }
-    # - covered : 71  (not ar_covered, not bounded)
-    if ( index($0, "- covered") > 0 && index($0, "ar_covered") == 0 && index($0, "bounded") == 0 ) {
-        split($0, a, ":")
-        match(a[length(a)], /[0-9]+/)
-        covers_covered = substr(a[length(a)], RSTART, RLENGTH) + 0
-    }
-    # - unreachable : 196  (not bounded)
-    if ( index($0, "- unreachable") > 0 && index($0, "bounded") == 0 ) {
-        split($0, a, ":")
-        match(a[length(a)], /[0-9]+/)
-        covers_unreach = substr(a[length(a)], RSTART, RLENGTH) + 0
-    }
-}
-
-END {
-    proven_pct  = (assert_total > 0) ? assert_proven  / assert_total  * 100 : 0
-    covered_pct = (covers_total > 0) ? covers_covered / covers_total  * 100 : 0
-
-    proven_str  = assert_proven "/" assert_total
-    covered_str = sprintf("%.4f%%", covered_pct)
-
-    if      ( assert_cex > 0 )                                   status = "FAIL"
-    else if ( assert_proven == assert_total && assert_total > 0 ) status = "PASS"
-    else if ( assert_proven > 0 )                                 status = "PARTIAL"
-    else                                                          status = "EMPTY"
-
-    SEP = "+-----------------------"
-    print "FPV summary on " module
-    print SEP
-    printf "| %-12s | %-8s | %-10s |\n", "cust", "proven", "covered"
-    print SEP
-    printf "| %-12s | %-8s | %-10s |\n", cust, proven_str, covered_str
-    print SEP
-    print ""
-    print "# --- Detail ---"
-    print "# Log file               : " logfile
-    print "# Properties Considered  : " props_total
-    print "# Assertions total       : " assert_total
-    print "# Assertions proven      : " assert_proven
-    print "# Assertions cex         : " assert_cex
-    print "# Covers total           : " covers_total
-    print "# Covers covered         : " covers_covered
-    print "# Covers unreachable     : " covers_unreach
-    print "# Status                 : " status
-}
-AWKEOF
+printf '%s\n' 'BEGIN {'                                                                         >> "$AWK_SCRIPT"
+printf '%s\n' '    summary_line   = 0'                                                          >> "$AWK_SCRIPT"
+printf '%s\n' '    collecting     = 0'                                                          >> "$AWK_SCRIPT"
+printf '%s\n' '    props_total    = 0'                                                          >> "$AWK_SCRIPT"
+printf '%s\n' '    assert_total   = 0'                                                          >> "$AWK_SCRIPT"
+printf '%s\n' '    assert_proven  = 0'                                                          >> "$AWK_SCRIPT"
+printf '%s\n' '    assert_cex     = 0'                                                          >> "$AWK_SCRIPT"
+printf '%s\n' '    covers_total   = 0'                                                          >> "$AWK_SCRIPT"
+printf '%s\n' '    covers_covered = 0'                                                          >> "$AWK_SCRIPT"
+printf '%s\n' '    covers_unreach = 0'                                                          >> "$AWK_SCRIPT"
+printf '%s\n' '}'                                                                               >> "$AWK_SCRIPT"
+printf '%s\n' '$0 == "SUMMARY" { summary_line = NR; next }'                                     >> "$AWK_SCRIPT"
+printf '%s\n' 'index($0,"===") == 1 && NR == summary_line + 1 { collecting = 1; next }'        >> "$AWK_SCRIPT"
+printf '%s\n' 'collecting == 1 && $0 !~ /^[ \t]/ { collecting = 0; next }'                     >> "$AWK_SCRIPT"
+printf '%s\n' 'collecting == 1 {'                                                               >> "$AWK_SCRIPT"
+printf '%s\n' '    if ( index($0,"Properties Considered") > 0 ) {'                             >> "$AWK_SCRIPT"
+printf '%s\n' '        n = split($0,a,":"); match(a[n],/[0-9]+/)'                              >> "$AWK_SCRIPT"
+printf '%s\n' '        props_total = substr(a[n],RSTART,RLENGTH) + 0'                          >> "$AWK_SCRIPT"
+printf '%s\n' '    }'                                                                           >> "$AWK_SCRIPT"
+printf '%s\n' '    if ( index($0,"assertions") > 0 && index($0,"-") == 0 ) {'                  >> "$AWK_SCRIPT"
+printf '%s\n' '        n = split($0,a,":"); match(a[n],/[0-9]+/)'                              >> "$AWK_SCRIPT"
+printf '%s\n' '        assert_total = substr(a[n],RSTART,RLENGTH) + 0'                         >> "$AWK_SCRIPT"
+printf '%s\n' '    }'                                                                           >> "$AWK_SCRIPT"
+printf '%s\n' '    if ( index($0,"- proven") > 0 && index($0,"bounded") == 0 && index($0,"marked") == 0 ) {' >> "$AWK_SCRIPT"
+printf '%s\n' '        n = split($0,a,":"); match(a[n],/[0-9]+/)'                              >> "$AWK_SCRIPT"
+printf '%s\n' '        assert_proven = substr(a[n],RSTART,RLENGTH) + 0'                        >> "$AWK_SCRIPT"
+printf '%s\n' '    }'                                                                           >> "$AWK_SCRIPT"
+printf '%s\n' '    if ( index($0,"- cex") > 0 && index($0,"ar_cex") == 0 ) {'                  >> "$AWK_SCRIPT"
+printf '%s\n' '        n = split($0,a,":"); match(a[n],/[0-9]+/)'                              >> "$AWK_SCRIPT"
+printf '%s\n' '        assert_cex = substr(a[n],RSTART,RLENGTH) + 0'                           >> "$AWK_SCRIPT"
+printf '%s\n' '    }'                                                                           >> "$AWK_SCRIPT"
+printf '%s\n' '    if ( index($0,"covers") > 0 && index($0,"-") == 0 ) {'                      >> "$AWK_SCRIPT"
+printf '%s\n' '        n = split($0,a,":"); match(a[n],/[0-9]+/)'                              >> "$AWK_SCRIPT"
+printf '%s\n' '        covers_total = substr(a[n],RSTART,RLENGTH) + 0'                         >> "$AWK_SCRIPT"
+printf '%s\n' '    }'                                                                           >> "$AWK_SCRIPT"
+printf '%s\n' '    if ( index($0,"- covered") > 0 && index($0,"ar_covered") == 0 && index($0,"bounded") == 0 ) {' >> "$AWK_SCRIPT"
+printf '%s\n' '        n = split($0,a,":"); match(a[n],/[0-9]+/)'                              >> "$AWK_SCRIPT"
+printf '%s\n' '        covers_covered = substr(a[n],RSTART,RLENGTH) + 0'                       >> "$AWK_SCRIPT"
+printf '%s\n' '    }'                                                                           >> "$AWK_SCRIPT"
+printf '%s\n' '    if ( index($0,"- unreachable") > 0 && index($0,"bounded") == 0 ) {'         >> "$AWK_SCRIPT"
+printf '%s\n' '        n = split($0,a,":"); match(a[n],/[0-9]+/)'                              >> "$AWK_SCRIPT"
+printf '%s\n' '        covers_unreach = substr(a[n],RSTART,RLENGTH) + 0'                       >> "$AWK_SCRIPT"
+printf '%s\n' '    }'                                                                           >> "$AWK_SCRIPT"
+printf '%s\n' '}'                                                                               >> "$AWK_SCRIPT"
+printf '%s\n' 'END {'                                                                           >> "$AWK_SCRIPT"
+printf '%s\n' '    proven_pct  = (assert_total > 0) ? assert_proven / assert_total * 100 : 0'  >> "$AWK_SCRIPT"
+printf '%s\n' '    covered_pct = (covers_total > 0) ? covers_covered / covers_total * 100 : 0' >> "$AWK_SCRIPT"
+printf '%s\n' '    proven_str  = assert_proven "/" assert_total'                                >> "$AWK_SCRIPT"
+printf '%s\n' '    covered_str = sprintf("%.4f%%", covered_pct)'                               >> "$AWK_SCRIPT"
+printf '%s\n' '    if      ( assert_cex > 0 )                                   status = "FAIL"'    >> "$AWK_SCRIPT"
+printf '%s\n' '    else if ( assert_proven == assert_total && assert_total > 0 ) status = "PASS"'    >> "$AWK_SCRIPT"
+printf '%s\n' '    else if ( assert_proven > 0 )                                 status = "PARTIAL"' >> "$AWK_SCRIPT"
+printf '%s\n' '    else                                                          status = "EMPTY"'   >> "$AWK_SCRIPT"
+printf '%s\n' '    SEP = "+-----------------------"'                                           >> "$AWK_SCRIPT"
+printf '%s\n' '    print "FPV summary on " module'                                             >> "$AWK_SCRIPT"
+printf '%s\n' '    print SEP'                                                                  >> "$AWK_SCRIPT"
+printf '%s\n' '    printf "| %-12s | %-8s | %-10s |\n", "cust", "proven", "covered"'          >> "$AWK_SCRIPT"
+printf '%s\n' '    print SEP'                                                                  >> "$AWK_SCRIPT"
+printf '%s\n' '    printf "| %-12s | %-8s | %-10s |\n", cust, proven_str, covered_str'        >> "$AWK_SCRIPT"
+printf '%s\n' '    print SEP'                                                                  >> "$AWK_SCRIPT"
+printf '%s\n' '    print ""'                                                                   >> "$AWK_SCRIPT"
+printf '%s\n' '    print "# --- Detail ---"'                                                   >> "$AWK_SCRIPT"
+printf '%s\n' '    print "# Log file               : " logfile'                                >> "$AWK_SCRIPT"
+printf '%s\n' '    print "# Properties Considered  : " props_total'                            >> "$AWK_SCRIPT"
+printf '%s\n' '    print "# Assertions total       : " assert_total'                           >> "$AWK_SCRIPT"
+printf '%s\n' '    print "# Assertions proven      : " assert_proven'                          >> "$AWK_SCRIPT"
+printf '%s\n' '    print "# Assertions cex         : " assert_cex'                             >> "$AWK_SCRIPT"
+printf '%s\n' '    print "# Covers total           : " covers_total'                           >> "$AWK_SCRIPT"
+printf '%s\n' '    print "# Covers covered         : " covers_covered'                         >> "$AWK_SCRIPT"
+printf '%s\n' '    print "# Covers unreachable     : " covers_unreach'                         >> "$AWK_SCRIPT"
+printf '%s\n' '    print "# Status                 : " status'                                 >> "$AWK_SCRIPT"
+printf '%s\n' '}'                                                                               >> "$AWK_SCRIPT"
 
 # ---------------------------------------------------------------------------
 # Discover customer directories (fuse_* excluding fuse_*_visa)
