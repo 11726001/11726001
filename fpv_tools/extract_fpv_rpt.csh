@@ -6,10 +6,12 @@
 # structured .rpt file per FPV module per customer.
 #
 # Log path pattern:
-#   <BASE_DIR>/fuse_<CUSTOMER>/jasper/fuse_fpv_<MODULE>_out/jg_fpv/log/*.{rpt,log}
+#   <BASE_DIR>/fuse_<CUSTOMER>/jasper/fuse_fpv_<MODULE>_out/jg_fpv/log/fuse.fpv.log
 #
 # - CUSTOMER : parsed from directory name  fuse_<CUSTOMER>  (fuse_*_visa skipped)
 # - MODULE   : parsed from directory name  fuse_fpv_<MODULE>_out
+#
+# Log file search order: fuse.fpv.log > *.log > *.rpt
 #
 # Output .rpt files are written to:
 #   <RPT_DIR>/<MODULE>/<CUSTOMER>.rpt
@@ -143,21 +145,30 @@ foreach CUST_FULL ( $CUST_DIRS )
             continue
         endif
 
-        # Find first .rpt then .log file using glob
+        # -------------------------------------------------------------------
+        # Find log file — priority:
+        #   1. fuse.fpv.log  (canonical Jasper FPV log)
+        #   2. any *.log
+        #   3. any *.rpt
+        # -------------------------------------------------------------------
         set LOG_FILE = ""
 
-        set RPT_CANDS = ( ${LOG_DIR}/*.rpt )
-        if ( -f "$RPT_CANDS[1]" ) then
-            set LOG_FILE = "$RPT_CANDS[1]"
+        if ( -f "${LOG_DIR}/fuse.fpv.log" ) then
+            set LOG_FILE = "${LOG_DIR}/fuse.fpv.log"
         else
             set LOG_CANDS = ( ${LOG_DIR}/*.log )
             if ( -f "$LOG_CANDS[1]" ) then
                 set LOG_FILE = "$LOG_CANDS[1]"
+            else
+                set RPT_CANDS = ( ${LOG_DIR}/*.rpt )
+                if ( -f "$RPT_CANDS[1]" ) then
+                    set LOG_FILE = "$RPT_CANDS[1]"
+                endif
             endif
         endif
 
         if ( "$LOG_FILE" == "" ) then
-            echo "  [SKIP] $CUST_NAME / $MOD_NAME -- no .rpt or .log in $LOG_DIR"
+            echo "  [SKIP] $CUST_NAME / $MOD_NAME -- no fuse.fpv.log / *.log / *.rpt in $LOG_DIR"
             @ total_missing++
             continue
         endif
