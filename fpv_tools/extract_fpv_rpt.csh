@@ -21,7 +21,7 @@
 # =============================================================================
 
 # ---------------------------------------------------------------------------
-# Fixed NFS paths �� update here if project paths change
+# Fixed NFS paths -- update here if project paths change
 # ---------------------------------------------------------------------------
 set DEFAULT_BASE_DIR = "/nfs/site/disks/zsc11_fuse_00003/ip-fuse-gen4p1-cth-uvm-FPV-cron/ip-fuse-gen4p1-cth/output"
 set DEFAULT_RPT_DIR  = "/nfs/site/disks/zsc11_fuse_00003/ip-fuse-gen4p1-cth-uvm-FPV-cron/scripts/fpv_rpt"
@@ -75,10 +75,11 @@ endif
 # ---------------------------------------------------------------------------
 # Write the awk parser to a temp file to avoid CSH single-quote conflicts
 #
-# Actual log SUMMARY block format (Jasper FPV):
-#   ==============================================================
-#   SUMMARY
-#   ==============================================================
+# Actual log SUMMARY block format (Jasper FPV fuse.fpv.log):
+#
+#   ==============================================================   <- fence (line N)
+#   SUMMARY                                                          <- keyword (line N+1)
+#   ==============================================================   <- fence (line N+2) -> START parsing
 #            Properties Considered              : 388
 #                  assertions                   : 121
 #                   - proven                    : 121 (100%)
@@ -86,20 +87,20 @@ endif
 #                  covers                       : 267
 #                   - covered                   : 71 (26.59%)
 #                   - unreachable               : 196 (73.41%)
-#   ==============================================================
+#   ==============================================================   <- fence -> STOP
 #
-# State machine:
-#   0 = initial
-#   1 = saw opening ==== fence
-#   2 = saw SUMMARY keyword (between fences)
-#   3 = saw second ==== fence — now inside data block, parse lines
-#   4 = saw closing ==== fence — done
+# Strategy: track the line number of "SUMMARY" keyword.
+# Once found, the very next ==== fence line starts data collection,
+# and the fence after that stops it.
+# This avoids any state-machine ordering issues.
 # ---------------------------------------------------------------------------
 set AWK_SCRIPT = "/tmp/fpv_parse_$$.awk"
 
 cat > "$AWK_SCRIPT" << 'AWKEOF'
 BEGIN {
-    in_summary     = 0
+    summary_line   = 0
+    collecting     = 0
+    done           = 0
     props_total    = 0
     assert_total   = 0
     assert_proven  = 0
@@ -109,60 +110,75 @@ BEGIN {
     covers_unreach = 0
 }
 
-/^={10,}/ {
-    if      ( in_summary == 0 ) { in_summary = 1 }  # opening fence before SUMMARY
-    else if ( in_summary == 2 ) { in_summary = 3 }  # fence after SUMMARY keyword -> start data
-    else if ( in_summary == 3 ) { in_summary = 4 }  # closing fence -> stop
+# Already done - skip everything
+done == 1 { next }
+
+# Track line number of bare SUMMARY keyword
+/^SUMMARY$/ {
+    summary_line = NR
     next
 }
 
-# SUMMARY keyword must appear between state 1 fences
-/^[[:space:]]*SUMMARY[[:space:]]*$/ {
-    if ( in_summary == 1 ) { in_summary = 2 }
+# ==== fence lines
+/^=+$/ {
+    if ( summary_line > 0 && collecting == 0 && NR == summary_line + 1 ) {
+        # This is the fence immediately after SUMMARY - start collecting
+        collecting = 1
+        next
+    }
+    if ( collecting == 1 ) {
+        # This is the closing fence - stop
+        done = 1
+        next
+    }
     next
 }
 
-# If we hit a non-fence, non-SUMMARY line while in state 1, reset
-# (avoids false triggers from other ==== fences earlier in the log)
-in_summary == 1 {
-    in_summary = 0
-    next
-}
-
-# Parse data lines only in state 3
-in_summary == 3 {
-    # Properties Considered
+# Parse data lines while collecting
+collecting == 1 {
+    # Properties Considered : 388
     if ( $0 ~ /Properties Considered/ ) {
-        split($0, a, ":"); match(a[2], /[0-9]+/); props_total = substr(a[2], RSTART, RLENGTH) + 0
+        n = split($0, a, ":")
+        match(a[n], /[0-9]+/)
+        props_total = substr(a[n], RSTART, RLENGTH) + 0
     }
-    # assertions total (not a sub-item line starting with -)
+    # assertions : 121
     if ( $0 ~ /assertions/ && $0 !~ /^[[:space:]]*-/ ) {
-        split($0, a, ":"); match(a[2], /[0-9]+/); assert_total = substr(a[2], RSTART, RLENGTH) + 0
+        n = split($0, a, ":")
+        match(a[n], /[0-9]+/)
+        assert_total = substr(a[n], RSTART, RLENGTH) + 0
     }
-    # proven (not bounded_proven, not marked_proven)
+    # - proven : 121 (100%)
     if ( $0 ~ /- proven/ && $0 !~ /bounded/ && $0 !~ /marked/ ) {
-        split($0, a, ":"); match(a[2], /[0-9]+/); assert_proven = substr(a[2], RSTART, RLENGTH) + 0
+        n = split($0, a, ":")
+        match(a[n], /[0-9]+/)
+        assert_proven = substr(a[n], RSTART, RLENGTH) + 0
     }
-    # cex (not ar_cex)
+    # - cex : 0 (0%)
     if ( $0 ~ /- cex/ && $0 !~ /ar_cex/ ) {
-        split($0, a, ":"); match(a[2], /[0-9]+/); assert_cex = substr(a[2], RSTART, RLENGTH) + 0
+        n = split($0, a, ":")
+        match(a[n], /[0-9]+/)
+        assert_cex = substr(a[n], RSTART, RLENGTH) + 0
     }
-    # covers total (not a sub-item line)
+    # covers : 267
     if ( $0 ~ /covers/ && $0 !~ /^[[:space:]]*-/ ) {
-        split($0, a, ":"); match(a[2], /[0-9]+/); covers_total = substr(a[2], RSTART, RLENGTH) + 0
+        n = split($0, a, ":")
+        match(a[n], /[0-9]+/)
+        covers_total = substr(a[n], RSTART, RLENGTH) + 0
     }
-    # covered (not ar_covered, not bounded)
+    # - covered : 71 (26.59%)
     if ( $0 ~ /- covered/ && $0 !~ /ar_covered/ && $0 !~ /bounded/ ) {
-        split($0, a, ":"); match(a[2], /[0-9]+/); covers_covered = substr(a[2], RSTART, RLENGTH) + 0
+        n = split($0, a, ":")
+        match(a[n], /[0-9]+/)
+        covers_covered = substr(a[n], RSTART, RLENGTH) + 0
     }
-    # unreachable (not bounded)
+    # - unreachable : 196 (73.41%)
     if ( $0 ~ /- unreachable/ && $0 !~ /bounded/ ) {
-        split($0, a, ":"); match(a[2], /[0-9]+/); covers_unreach = substr(a[2], RSTART, RLENGTH) + 0
+        n = split($0, a, ":")
+        match(a[n], /[0-9]+/)
+        covers_unreach = substr(a[n], RSTART, RLENGTH) + 0
     }
 }
-
-# Skip everything after closing fence
-in_summary == 4 { next }
 
 END {
     proven_pct  = (assert_total > 0) ? assert_proven  / assert_total  * 100 : 0
