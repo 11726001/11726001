@@ -5,36 +5,82 @@
 # Reads Jasper FPV log files, extracts the SUMMARY block, and writes one
 # structured .rpt file per FPV module per customer.
 #
-# Log path convention expected:
-#   output/<customer>/jasper/fuse_fpv_<module>_out/jg_fpv/log/<logfile>
+# Log path auto-discovery pattern:
+#   <BASE_DIR>/fuse_<CUSTOMER>/jasper/fuse_fpv_<MODULE>_out/jg_fpv/log/*.{rpt,log}
 #
-# Examples:
-#   output/fuse_DMRDARW/jasper/fuse_fpv_fuse_distr_fsm_out/jg_fpv/log/fuse.jg_fpv.rpt
-#   output/fuse_DMRDARW/jasper/fuse_fpv_fuse_mem_if_arb_out/jg_fpv/log/fuse.fpv.log
+# - BASE_DIR   : auto-detected as the script's parent/../output, or pass as $1
+# - CUSTOMER   : parsed from directory name  fuse_<CUSTOMER>
+# - MODULE     : parsed from directory name  fuse_fpv_<MODULE>_out
 #
 # Output .rpt files are written to:
-#   <RPT_OUTDIR>/<module>/<customer>.rpt
+#   <RPT_DIR>/<MODULE>/<CUSTOMER>.rpt
 #
 # Usage:
 #   csh extract_fpv_rpt.csh [base_output_dir] [rpt_out_dir]
 #
 # Arguments:
-#   base_output_dir   Root directory containing output/<customer>/... tree
-#                     (default: output)
-#   rpt_out_dir       Directory to write .rpt files
-#                     (default: fpv_rpt)
+#   base_output_dir   Full path to the directory that contains fuse_* customer
+#                     subdirs (default: auto-detected from script location)
+#   rpt_out_dir       Directory to write .rpt files (default: fpv_rpt next to script)
 # =============================================================================
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Auto-detect BASE_DIR from script location if not provided
+# Convention: script lives in  <project_root>/fpv_tools/
+#             output lives in  <project_root>/output/
+#   i.e. two levels up from the script, then into output/
 # ---------------------------------------------------------------------------
-set BASE_DIR  = "output"
-set RPT_DIR   = "fpv_rpt"
+set SCRIPT_DIR = `dirname $0`
+set SCRIPT_DIR = `cd "$SCRIPT_DIR" && pwd`
 
-if ( $#argv >= 1 ) set BASE_DIR = $argv[1]
-if ( $#argv >= 2 ) set RPT_DIR  = $argv[2]
+# Default BASE_DIR: look for 'output' sibling of the script's parent,
+# then fall back to the known NFS path pattern found via glob.
+if ( $#argv >= 1 ) then
+    set BASE_DIR = $argv[1]
+else
+    # Walk up from script dir to find an 'output' directory automatically
+    set BASE_DIR = ""
 
-set MODULES = ( fuse_distr_fsm fuse_mem_if_arb )
+    # Try: script_dir/../output
+    set CANDIDATE = "${SCRIPT_DIR}/../output"
+    if ( -d "$CANDIDATE" ) then
+        set BASE_DIR = `cd "$CANDIDATE" && pwd`
+    endif
+
+    # Try: script_dir/../../output
+    if ( "$BASE_DIR" == "" ) then
+        set CANDIDATE = "${SCRIPT_DIR}/../../output"
+        if ( -d "$CANDIDATE" ) then
+            set BASE_DIR = `cd "$CANDIDATE" && pwd`
+        endif
+    endif
+
+    # Try: find any 'output' directory containing fuse_* subdirs via find
+    if ( "$BASE_DIR" == "" ) then
+        set CANDIDATE = `find ${SCRIPT_DIR} -maxdepth 4 -type d -name "output" 2>/dev/null | head -1`
+        if ( "$CANDIDATE" != "" && -d "$CANDIDATE" ) then
+            set BASE_DIR = "$CANDIDATE"
+        endif
+    endif
+
+    if ( "$BASE_DIR" == "" ) then
+        echo "ERROR: Could not auto-detect base output directory."
+        echo "       Please pass it explicitly:"
+        echo "       csh extract_fpv_rpt.csh <base_output_dir> [rpt_out_dir]"
+        echo ""
+        echo "       Example:"
+        echo "       csh extract_fpv_rpt.csh \\"
+        echo "         /nfs/site/disks/zsc11_fuse_00003/ip-fuse-gen4p1-cth-uvm-FPV-cron/ip-fuse-gen4p1-cth/output"
+        exit 1
+    endif
+endif
+
+# Default RPT_DIR: next to the script
+if ( $#argv >= 2 ) then
+    set RPT_DIR = $argv[2]
+else
+    set RPT_DIR = "${SCRIPT_DIR}/fpv_rpt"
+endif
 
 echo "=============================================================="
 echo "  FPV LOG EXTRACTOR"
@@ -45,154 +91,160 @@ echo "=============================================================="
 echo ""
 
 # ---------------------------------------------------------------------------
-# Discover all customer directories under BASE_DIR
+# Validate base directory
 # ---------------------------------------------------------------------------
 if ( ! -d "$BASE_DIR" ) then
     echo "ERROR: Base directory not found: $BASE_DIR"
     exit 1
 endif
 
-set CUSTOMERS = ( `ls -1 "$BASE_DIR"` )
+# ---------------------------------------------------------------------------
+# Auto-discover customer directories  (match: fuse_*/jasper/)
+# Customer name = directory name with leading fuse_ stripped
+# ---------------------------------------------------------------------------
+set CUST_DIRS = ( `find "$BASE_DIR" -maxdepth 1 -type d -name "fuse_*" 2>/dev/null | sort` )
 
-if ( $#CUSTOMERS == 0 ) then
-    echo "ERROR: No customer directories found under $BASE_DIR"
+if ( $#CUST_DIRS == 0 ) then
+    echo "ERROR: No customer directories (fuse_*) found under $BASE_DIR"
     exit 1
 endif
 
-# ---------------------------------------------------------------------------
-# Create output RPT directories per module
-# ---------------------------------------------------------------------------
-foreach MOD ( $MODULES )
-    if ( ! -d "${RPT_DIR}/${MOD}" ) then
-        mkdir -p "${RPT_DIR}/${MOD}"
-    endif
+echo "  Found $#CUST_DIRS customer dir(s):"
+foreach D ( $CUST_DIRS )
+    echo "    $D"
 end
+echo ""
 
 # ---------------------------------------------------------------------------
-# Process each customer x module combination
+# Auto-discover module directories inside each customer's jasper/ dir
+# Module name extracted from:  fuse_fpv_<MODULE>_out
 # ---------------------------------------------------------------------------
 set total_extracted = 0
 set total_missing   = 0
 
-foreach CUST_DIR ( $CUSTOMERS )
-    set CUST_PATH = "${BASE_DIR}/${CUST_DIR}"
-    if ( ! -d "$CUST_PATH" ) continue
+foreach CUST_FULL ( $CUST_DIRS )
 
-    # Strip "fuse_" prefix from customer dir name for display (e.g. fuse_DMRDARW -> DMRDARW)
+    # Parse customer name: strip path and leading fuse_
+    set CUST_DIR  = `basename "$CUST_FULL"`
     set CUST_NAME = `echo "$CUST_DIR" | sed 's/^fuse_//'`
 
-    foreach MOD ( $MODULES )
-        # Locate the log file for this customer + module
-        # Pattern: output/<cust>/jasper/fuse_fpv_<mod>_out/jg_fpv/log/*.rpt or *.log
-        set LOG_DIR = "${CUST_PATH}/jasper/fuse_fpv_${MOD}_out/jg_fpv/log"
+    set JASPER_DIR = "${CUST_FULL}/jasper"
+    if ( ! -d "$JASPER_DIR" ) then
+        echo "  [SKIP] $CUST_NAME -- no jasper/ directory at $JASPER_DIR"
+        continue
+    endif
 
+    # Find all fuse_fpv_*_out directories under jasper/
+    set MOD_DIRS = ( `find "$JASPER_DIR" -maxdepth 1 -type d -name "fuse_fpv_*_out" 2>/dev/null | sort` )
+
+    if ( $#MOD_DIRS == 0 ) then
+        echo "  [SKIP] $CUST_NAME -- no fuse_fpv_*_out dirs in $JASPER_DIR"
+        continue
+    endif
+
+    foreach MOD_FULL ( $MOD_DIRS )
+
+        # Parse module name: strip fuse_fpv_ prefix and _out suffix
+        set MOD_DIR  = `basename "$MOD_FULL"`
+        set MOD_NAME = `echo "$MOD_DIR" | sed 's/^fuse_fpv_//' | sed 's/_out$//'`
+
+        # Locate log directory
+        set LOG_DIR = "${MOD_FULL}/jg_fpv/log"
         if ( ! -d "$LOG_DIR" ) then
-            echo "  [SKIP] $CUST_NAME / $MOD  -- log dir not found: $LOG_DIR"
+            echo "  [SKIP] $CUST_NAME / $MOD_NAME -- log dir not found: $LOG_DIR"
             @ total_missing++
             continue
         endif
 
-        # Find the first .rpt or .log file in the log directory
+        # Find the first .rpt or .log file
         set LOG_FILE = ""
         foreach EXT ( rpt log )
             set CANDIDATE = `ls -1 ${LOG_DIR}/*.${EXT} 2>/dev/null | head -1`
-            if ( "$CANDIDATE" != "" && -f "$CANDIDATE" ) then
-                set LOG_FILE = "$CANDIDATE"
-                break
+            if ( "$CANDIDATE" != "" ) then
+                if ( -f "$CANDIDATE" ) then
+                    set LOG_FILE = "$CANDIDATE"
+                    break
+                endif
             endif
         end
 
         if ( "$LOG_FILE" == "" ) then
-            echo "  [SKIP] $CUST_NAME / $MOD  -- no .rpt or .log file in $LOG_DIR"
+            echo "  [SKIP] $CUST_NAME / $MOD_NAME -- no .rpt or .log in $LOG_DIR"
             @ total_missing++
             continue
         endif
 
-        echo "  [EXTRACT] $CUST_NAME / $MOD"
+        echo "  [EXTRACT] $CUST_NAME / $MOD_NAME"
         echo "            Log : $LOG_FILE"
 
-        # Output .rpt path
-        set OUT_RPT = "${RPT_DIR}/${MOD}/${CUST_NAME}.rpt"
+        # Create output RPT dir for this module if needed
+        if ( ! -d "${RPT_DIR}/${MOD_NAME}" ) then
+            mkdir -p "${RPT_DIR}/${MOD_NAME}"
+        endif
+
+        set OUT_RPT = "${RPT_DIR}/${MOD_NAME}/${CUST_NAME}.rpt"
 
         # -------------------------------------------------------------------
-        # Extract SUMMARY block and parse fields using awk
+        # Parse SUMMARY block with awk and write structured .rpt
         # -------------------------------------------------------------------
-        awk -v cust="$CUST_NAME" -v module="$MOD" '
+        awk -v cust="$CUST_NAME" -v module="$MOD_NAME" -v logfile="$LOG_FILE" '
         BEGIN {
-            in_summary      = 0
-            props_total     = 0
-            assert_total    = 0
-            assert_proven   = 0
-            assert_cex      = 0
-            covers_total    = 0
-            covers_covered  = 0
-            covers_unreach  = 0
+            in_summary     = 0
+            props_total    = 0
+            assert_total   = 0
+            assert_proven  = 0
+            assert_cex     = 0
+            covers_total   = 0
+            covers_covered = 0
+            covers_unreach = 0
         }
 
-        # Enter summary block
-        /^={10,}/ { if ( in_summary == 1 ) in_summary = 2; next }
-        /SUMMARY/  { if ( in_summary == 0 ) { in_summary = 1 }; next }
+        # State machine: look for SUMMARY header then ==== fence
+        /SUMMARY/ {
+            if ( in_summary == 0 ) { in_summary = 1 }
+            next
+        }
+        /^={10,}/ {
+            if ( in_summary == 1 ) { in_summary = 2 }
+            next
+        }
 
-        # Parse fields inside summary block
         in_summary == 2 {
-            # Properties Considered
             if ( $0 ~ /Properties Considered/ ) {
-                match($0, /: *([0-9]+)/, a); props_total = a[1] + 0
+                match($0, /[0-9]+/); props_total = substr($0, RSTART, RLENGTH) + 0
             }
-            # assertions total
-            if ( $0 ~ /^ *assertions/ && $0 !~ /- / ) {
-                match($0, /: *([0-9]+)/, a); assert_total = a[1] + 0
+            if ( $0 ~ /^ *assertions *:/ ) {
+                match($0, /[0-9]+/); assert_total = substr($0, RSTART, RLENGTH) + 0
             }
-            # proven
-            if ( $0 ~ /- proven/ && $0 !~ /bounded/ && $0 !~ /marked/ ) {
-                match($0, /: *([0-9]+)/, a); assert_proven = a[1] + 0
+            if ( $0 ~ /- proven *:/ && $0 !~ /bounded/ && $0 !~ /marked/ ) {
+                match($0, /[0-9]+/); assert_proven = substr($0, RSTART, RLENGTH) + 0
             }
-            # cex
-            if ( $0 ~ /- cex/ && $0 !~ /ar_cex/ ) {
-                match($0, /: *([0-9]+)/, a); assert_cex = a[1] + 0
+            if ( $0 ~ /- cex *:/ && $0 !~ /ar_cex/ ) {
+                match($0, /[0-9]+/); assert_cex = substr($0, RSTART, RLENGTH) + 0
             }
-            # covers total
-            if ( $0 ~ /^ *covers/ && $0 !~ /- / ) {
-                match($0, /: *([0-9]+)/, a); covers_total = a[1] + 0
+            if ( $0 ~ /^ *covers *:/ ) {
+                match($0, /[0-9]+/); covers_total = substr($0, RSTART, RLENGTH) + 0
             }
-            # covered
-            if ( $0 ~ /- covered/ && $0 !~ /ar_covered/ && $0 !~ /bounded/ ) {
-                match($0, /: *([0-9]+)/, a); covers_covered = a[1] + 0
+            if ( $0 ~ /- covered *:/ && $0 !~ /ar_covered/ && $0 !~ /bounded/ ) {
+                match($0, /[0-9]+/); covers_covered = substr($0, RSTART, RLENGTH) + 0
             }
-            # unreachable
-            if ( $0 ~ /- unreachable/ && $0 !~ /bounded/ ) {
-                match($0, /: *([0-9]+)/, a); covers_unreach = a[1] + 0
+            if ( $0 ~ /- unreachable *:/ && $0 !~ /bounded/ ) {
+                match($0, /[0-9]+/); covers_unreach = substr($0, RSTART, RLENGTH) + 0
             }
         }
 
         END {
-            # Compute percentages
-            if ( assert_total > 0 )
-                proven_pct = assert_proven / assert_total * 100
-            else
-                proven_pct = 0
+            proven_pct  = (assert_total  > 0) ? assert_proven  / assert_total  * 100 : 0
+            covered_pct = (covers_total  > 0) ? covers_covered / covers_total  * 100 : 0
 
-            if ( covers_total > 0 )
-                covered_pct = covers_covered / covers_total * 100
-            else
-                covered_pct = 0
-
-            # Format proven as "proven/total"
             proven_str  = assert_proven "/" assert_total
             covered_str = sprintf("%.4f%%", covered_pct)
 
-            # Determine pass/fail status
-            if ( assert_cex > 0 ) {
-                status = "FAIL"
-            } else if ( assert_proven == assert_total && assert_total > 0 ) {
-                status = "PASS"
-            } else if ( assert_proven > 0 ) {
-                status = "PARTIAL"
-            } else {
-                status = "EMPTY"
-            }
+            if      ( assert_cex > 0 )                                   status = "FAIL"
+            else if ( assert_proven == assert_total && assert_total > 0 ) status = "PASS"
+            else if ( assert_proven > 0 )                                 status = "PARTIAL"
+            else                                                          status = "EMPTY"
 
-            # Write .rpt in standard table format
             SEP = "+-----------------------"
             print "FPV summary on " module
             print SEP
@@ -202,14 +254,15 @@ foreach CUST_DIR ( $CUSTOMERS )
             print SEP
             print ""
             print "# --- Detail ---"
-            print "# Properties Considered : " props_total
-            print "# Assertions total      : " assert_total
-            print "# Assertions proven     : " assert_proven
-            print "# Assertions cex        : " assert_cex
-            print "# Covers total          : " covers_total
-            print "# Covers covered        : " covers_covered
-            print "# Covers unreachable    : " covers_unreach
-            print "# Status                : " status
+            print "# Log file               : " logfile
+            print "# Properties Considered  : " props_total
+            print "# Assertions total       : " assert_total
+            print "# Assertions proven      : " assert_proven
+            print "# Assertions cex         : " assert_cex
+            print "# Covers total           : " covers_total
+            print "# Covers covered         : " covers_covered
+            print "# Covers unreachable     : " covers_unreach
+            print "# Status                 : " status
         }
         ' "$LOG_FILE" > "$OUT_RPT"
 
@@ -221,8 +274,8 @@ foreach CUST_DIR ( $CUSTOMERS )
             @ total_missing++
         endif
 
-    end  # foreach MOD
-end  # foreach CUST_DIR
+    end  # foreach MOD_FULL
+end  # foreach CUST_FULL
 
 echo ""
 echo "=============================================================="
