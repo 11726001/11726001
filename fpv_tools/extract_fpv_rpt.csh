@@ -5,12 +5,11 @@
 # Reads Jasper FPV log files, extracts the SUMMARY block, and writes one
 # structured .rpt file per FPV module per customer.
 #
-# Log path auto-discovery pattern:
+# Log path pattern:
 #   <BASE_DIR>/fuse_<CUSTOMER>/jasper/fuse_fpv_<MODULE>_out/jg_fpv/log/*.{rpt,log}
 #
-# - BASE_DIR   : auto-detected as the script's parent/../output, or pass as $1
-# - CUSTOMER   : parsed from directory name  fuse_<CUSTOMER>
-# - MODULE     : parsed from directory name  fuse_fpv_<MODULE>_out
+# - CUSTOMER : parsed from directory name  fuse_<CUSTOMER>
+# - MODULE   : parsed from directory name  fuse_fpv_<MODULE>_out
 #
 # Output .rpt files are written to:
 #   <RPT_DIR>/<MODULE>/<CUSTOMER>.rpt
@@ -19,63 +18,29 @@
 #   csh extract_fpv_rpt.csh [base_output_dir] [rpt_out_dir]
 #
 # Arguments:
-#   base_output_dir   Full path to the directory that contains fuse_* customer
-#                     subdirs (default: auto-detected from script location)
-#   rpt_out_dir       Directory to write .rpt files (default: fpv_rpt next to script)
+#   base_output_dir   Full path to directory containing fuse_* customer subdirs
+#                     (default: fixed project NFS path below)
+#   rpt_out_dir       Directory to write .rpt files
+#                     (default: fpv_rpt/ next to this script)
 # =============================================================================
 
 # ---------------------------------------------------------------------------
-# Auto-detect BASE_DIR from script location if not provided
-# Convention: script lives in  <project_root>/fpv_tools/
-#             output lives in  <project_root>/output/
-#   i.e. two levels up from the script, then into output/
+# Fixed project NFS path — update here if project root changes
 # ---------------------------------------------------------------------------
+set DEFAULT_BASE_DIR = "/nfs/site/disks/zsc11_fuse_00003/ip-fuse-gen4p1-cth-uvm-FPV-cron/ip-fuse-gen4p1-cth/output"
+
 set SCRIPT_DIR = `dirname $0`
 set SCRIPT_DIR = `cd "$SCRIPT_DIR" && pwd`
 
-# Default BASE_DIR: look for 'output' sibling of the script's parent,
-# then fall back to the known NFS path pattern found via glob.
+# ---------------------------------------------------------------------------
+# Argument handling
+# ---------------------------------------------------------------------------
 if ( $#argv >= 1 ) then
     set BASE_DIR = $argv[1]
 else
-    # Walk up from script dir to find an 'output' directory automatically
-    set BASE_DIR = ""
-
-    # Try: script_dir/../output
-    set CANDIDATE = "${SCRIPT_DIR}/../output"
-    if ( -d "$CANDIDATE" ) then
-        set BASE_DIR = `cd "$CANDIDATE" && pwd`
-    endif
-
-    # Try: script_dir/../../output
-    if ( "$BASE_DIR" == "" ) then
-        set CANDIDATE = "${SCRIPT_DIR}/../../output"
-        if ( -d "$CANDIDATE" ) then
-            set BASE_DIR = `cd "$CANDIDATE" && pwd`
-        endif
-    endif
-
-    # Try: find any 'output' directory containing fuse_* subdirs via find
-    if ( "$BASE_DIR" == "" ) then
-        set CANDIDATE = `find ${SCRIPT_DIR} -maxdepth 4 -type d -name "output" 2>/dev/null | head -1`
-        if ( "$CANDIDATE" != "" && -d "$CANDIDATE" ) then
-            set BASE_DIR = "$CANDIDATE"
-        endif
-    endif
-
-    if ( "$BASE_DIR" == "" ) then
-        echo "ERROR: Could not auto-detect base output directory."
-        echo "       Please pass it explicitly:"
-        echo "       csh extract_fpv_rpt.csh <base_output_dir> [rpt_out_dir]"
-        echo ""
-        echo "       Example:"
-        echo "       csh extract_fpv_rpt.csh \\"
-        echo "         /nfs/site/disks/zsc11_fuse_00003/ip-fuse-gen4p1-cth-uvm-FPV-cron/ip-fuse-gen4p1-cth/output"
-        exit 1
-    endif
+    set BASE_DIR = "$DEFAULT_BASE_DIR"
 endif
 
-# Default RPT_DIR: next to the script
 if ( $#argv >= 2 ) then
     set RPT_DIR = $argv[2]
 else
@@ -95,12 +60,14 @@ echo ""
 # ---------------------------------------------------------------------------
 if ( ! -d "$BASE_DIR" ) then
     echo "ERROR: Base directory not found: $BASE_DIR"
+    echo ""
+    echo "  Please pass the correct path explicitly:"
+    echo "  csh extract_fpv_rpt.csh <base_output_dir> [rpt_out_dir]"
     exit 1
 endif
 
 # ---------------------------------------------------------------------------
-# Auto-discover customer directories  (match: fuse_*/jasper/)
-# Customer name = directory name with leading fuse_ stripped
+# Auto-discover customer directories (fuse_*) under BASE_DIR
 # ---------------------------------------------------------------------------
 set CUST_DIRS = ( `find "$BASE_DIR" -maxdepth 1 -type d -name "fuse_*" 2>/dev/null | sort` )
 
@@ -116,8 +83,7 @@ end
 echo ""
 
 # ---------------------------------------------------------------------------
-# Auto-discover module directories inside each customer's jasper/ dir
-# Module name extracted from:  fuse_fpv_<MODULE>_out
+# Process each customer x module combination
 # ---------------------------------------------------------------------------
 set total_extracted = 0
 set total_missing   = 0
@@ -134,7 +100,7 @@ foreach CUST_FULL ( $CUST_DIRS )
         continue
     endif
 
-    # Find all fuse_fpv_*_out directories under jasper/
+    # Auto-discover all fuse_fpv_*_out module directories under jasper/
     set MOD_DIRS = ( `find "$JASPER_DIR" -maxdepth 1 -type d -name "fuse_fpv_*_out" 2>/dev/null | sort` )
 
     if ( $#MOD_DIRS == 0 ) then
@@ -199,7 +165,7 @@ foreach CUST_FULL ( $CUST_DIRS )
             covers_unreach = 0
         }
 
-        # State machine: look for SUMMARY header then ==== fence
+        # State machine: SUMMARY keyword then ==== fence activates parsing
         /SUMMARY/ {
             if ( in_summary == 0 ) { in_summary = 1 }
             next
@@ -234,8 +200,8 @@ foreach CUST_FULL ( $CUST_DIRS )
         }
 
         END {
-            proven_pct  = (assert_total  > 0) ? assert_proven  / assert_total  * 100 : 0
-            covered_pct = (covers_total  > 0) ? covers_covered / covers_total  * 100 : 0
+            proven_pct  = (assert_total > 0) ? assert_proven  / assert_total  * 100 : 0
+            covered_pct = (covers_total > 0) ? covers_covered / covers_total  * 100 : 0
 
             proven_str  = assert_proven "/" assert_total
             covered_str = sprintf("%.4f%%", covered_pct)
